@@ -1,0 +1,28 @@
+/* DSH 0.2.1-rc.2 public theme token values used by the voice UI. */
+body {
+  --dsw-alias-bg-base: #fff;
+  --dsw-alias-bg-layer-1: #fff;
+  --dsw-alias-bg-layer-2: #fff;
+  --dsw-alias-border-l1: #0000000a;
+  --dsw-alias-label-primary: #0f1115;
+  --dsw-alias-label-secondary: #61666b;
+  --dsw-alias-label-tertiary: #81858c;
+  --dsw-specific-selector: #f5f6f7;
+  --dsw-alias-interactive-bg-hover-solid: #f1f3f5;
+  --dsw-alias-state-business-primary: #4176e6;
+  --dsw-alias-state-error-primary: #ec1313;
+}
+body[data-ds-dark-theme] {
+  --dsw-alias-bg-base: #151517;
+  --dsw-alias-bg-layer-1: #232324;
+  --dsw-alias-bg-layer-2: #2c2c2e;
+  --dsw-alias-border-l1: #ffffff0f;
+  --dsw-alias-label-primary: #f9fafb;
+  --dsw-alias-label-secondary: #cfd3d6;
+  --dsw-alias-label-tertiary: #adb2b8;
+  --dsw-specific-selector: #353638;
+  --dsw-alias-interactive-bg-hover-solid: #353638;
+  --dsw-alias-state-business-primary: #7aaaff;
+  --dsw-alias-state-error-primary: #f25a5a;
+}
+body { color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); }

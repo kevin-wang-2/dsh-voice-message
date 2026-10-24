@@ -36,7 +36,7 @@ const getUserMedia=async()=>{
  if(state.mode==='late')await new Promise(resolve=>pendingPermission=resolve);
  return dest.stream;
 };
-Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia,enumerateDevices:async()=>[{kind:'audioinput',deviceId:'default',label:'Test microphone'}]}});
+Object.defineProperty(navigator,'mediaDevices',{configurable:true,value:{getUserMedia,enumerateDevices:async()=>[{kind:'audioinput',deviceId:'default',label:'System microphone'},{kind:'audioinput',deviceId:'fixture-mic',label:'Test microphone'}]}});
 state.resolvePermission=()=>pendingPermission();
 const ctx={
  effect:fn=>{const dispose=fn();return dispose;},

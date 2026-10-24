@@ -1,6 +1,6 @@
 {
   "name": "dsh-voice-message",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "description": "DSH Web voice messages with preserved audio, local transcription and playback",

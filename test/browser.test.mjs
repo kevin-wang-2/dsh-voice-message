@@ -1,15 +1,19 @@
 import { test } from 'node:test';
+import { readFile } from 'node:fs/promises';
+import { buildVoiceText } from '../lib/contract.js';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { chromium, webkit } from 'playwright';
 
 const bundle=await build({entryPoints:['test/browser-fixture.js'],bundle:true,write:false,platform:'browser',format:'iife',target:'es2022'});
 const fixture=bundle.outputFiles[0].text;
+const theme=await readFile(new URL('./theme.css',import.meta.url),'utf8');
 async function boot(browser){
  const page=await browser.newPage({viewport:{width:390,height:844}});
  page.setDefaultTimeout(7000); page.on('pageerror', e=>console.log('BROWSER_ERROR',e.message));
  await page.route('https://voice.test/**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html><body><div id="messages"></div><div id="input" style="position:absolute;bottom:10px;right:20px"></div></body></html>'}));
  await page.goto('https://voice.test/');
+ await page.addStyleTag({content:theme});
  await page.addScriptTag({content:fixture});
  const capabilities=await page.evaluate(()=>({recorder:typeof MediaRecorder,audioContext:typeof AudioContext}));
  assert.equal(capabilities.recorder,'function','This recording test requires a browser build with MediaRecorder');
@@ -24,6 +28,33 @@ async function record(page){
  await page.getByRole('button',{name:'停止录音',exact:true}).click();
 }
 for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]]){
+ test(`${name}: light and dark themes keep panel, controls and playback card readable`,async()=>{
+  const browser=await engine.launch({headless:true});
+  try{
+   const page=await boot(browser);
+   const file={attachmentId:'theme-audio',name:'voice-theme-1s.wav',bytes:32044};
+   const text=buildVoiceText({file,seconds:1,mediaType:'audio/wav',status:'transcribed',transcript:'主题可读性检查'});
+   await page.evaluate(content=>voiceTest.show(content),[{type:'text',text},{type:'file',attachment:file}]);
+   for(const dark of [false,true,false]){
+    await page.evaluate(dark=>document.body.toggleAttribute('data-ds-dark-theme',dark),dark);
+    const colors=await page.evaluate(()=>[...document.querySelectorAll('.dsh-voice-panel,.dsh-voice-card')].map(el=>{
+     const style=getComputedStyle(el);
+     return{background:style.backgroundColor,color:style.color,scheme:style.colorScheme,controls:[...el.querySelectorAll('button,select,summary')].map(control=>({color:getComputedStyle(control).color,background:getComputedStyle(control).backgroundColor}))};
+    }));
+    assert.equal(colors.length,2);
+    const rgb=value=>value.match(/[\d.]+/g).map(Number);
+    const luminance=value=>rgb(value).slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((n,v,i)=>n+v*[.2126,.7152,.0722][i],0);
+    for(const color of colors){
+     const bg=luminance(color.background);const fg=luminance(color.color);
+     assert.ok((Math.max(bg,fg)+.05)/(Math.min(bg,fg)+.05)>=4.5,JSON.stringify(color));
+     assert.ok(dark?bg<.1:bg>.8);
+     assert.equal(color.scheme,dark?'dark':'light');
+     for(const control of color.controls)assert.equal(control.color,color.color);
+    }
+   }
+   await page.close();
+  }finally{await browser.close();}
+ });
  test(`${name}: recording preserves compressed original, ASR receives canonical WAV, send is explicit, player decodes`,async()=>{
   const browser=await engine.launch({headless:true});
   try{
