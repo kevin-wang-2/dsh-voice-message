@@ -120,6 +120,12 @@ function VoiceInput({ ctx, sessionId, locked }) {
   const [draft, setDraft] = useState(null);
   const [elapsed, setElapsed] = useState(0);
   const [preview, setPreview] = useState('');
+  const [settings, setSettings] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [hint, setHint] = useState('');
+  const [willSend, setWillSend] = useState(false);
+  const gesture = useRef(null);
+  const stopAtLimit = useRef();
   const life = useRef({ generation: 0, recording: null, abort: null, draft: null, phase: 'idle' });
   const provider = catalog?.providers.find(p => p.id === catalog.selection.providerId && p.location === 'host-local') ?? catalog?.providers.find(p => p.location === 'host-local');
   const ready = ['ready', 'standby'].includes(provider?.preparation.phase);
@@ -127,6 +133,8 @@ function VoiceInput({ ctx, sessionId, locked }) {
   const setPhaseNow = value => { life.current.phase = value; setPhase(value); };
 
   function reset(close = true) {
+    gesture.current = null;
+    setCancelling(false); setSettings(false); setHint(''); setWillSend(false);
     life.current.generation++;
     life.current.abort?.abort();
     life.current.recording?.dispose();
@@ -174,8 +182,10 @@ function VoiceInput({ ctx, sessionId, locked }) {
     };
   }, [open]);
   useEffect(() => {
+    void refreshCatalog();
+  }, []);
+  useEffect(() => {
     if (open) {
-      void refreshCatalog();
       navigator.mediaDevices?.enumerateDevices().then(all => setDevices(all.filter(d => d.kind === 'audioinput'))).catch(() => {});
     }
   }, [open]);
@@ -186,7 +196,10 @@ function VoiceInput({ ctx, sessionId, locked }) {
   }, [open, provider?.preparation.phase]);
   useEffect(() => {
     if (phase !== 'recording') return;
-    const timer = setInterval(() => setElapsed(Math.min(MAX_SECONDS, (performance.now() - life.current.recording.started) / 1000)), 200);
+    const recording = life.current.recording;
+    const timer = setInterval(() => {
+      if (life.current.phase === 'recording' && life.current.recording === recording) setElapsed(Math.min(MAX_SECONDS, (performance.now() - recording.started) / 1000));
+    }, 200);
     return () => clearInterval(timer);
   }, [phase]);
   useEffect(() => {
@@ -196,11 +209,20 @@ function VoiceInput({ ctx, sessionId, locked }) {
   }, [draft?.blob]);
   useEffect(() => {
     const hidden = () => { if (document.hidden && ['requesting', 'recording'].includes(life.current.phase)) reset(); };
+    const interrupted = () => { if (['requesting', 'recording'].includes(life.current.phase)) reset(); };
     document.addEventListener('visibilitychange', hidden);
-    return () => { document.removeEventListener('visibilitychange', hidden); life.current.generation++; life.current.abort?.abort(); life.current.recording?.dispose(); };
+    window.addEventListener('blur', interrupted);
+    return () => { document.removeEventListener('visibilitychange', hidden); window.removeEventListener('blur', interrupted); gesture.current = null; life.current.generation++; life.current.abort?.abort(); life.current.recording?.dispose(); };
   }, [sessionId]);
+  useEffect(() => {
+    if (!open) return;
+    const escape = event => { if (event.key === 'Escape' && life.current.phase !== 'sending') { event.preventDefault(); reset(); } };
+    document.addEventListener('keydown', escape);
+    return () => document.removeEventListener('keydown', escape);
+  }, [open]);
 
-  async function transcribe(recording, generation = life.current.generation) {
+  async function transcribe(recording, generation = life.current.generation, sendOnReady = false) {
+    setWillSend(sendOnReady);
     setPhaseNow('transcribing'); setError('');
     const abort = new AbortController(); life.current.abort = abort;
     try {
@@ -214,14 +236,19 @@ function VoiceInput({ ctx, sessionId, locked }) {
       if (generation !== life.current.generation) return;
       const value = { ...recording, transcript: result.text.trim(), status: result.text.trim() ? 'transcribed' : 'empty' };
       life.current.draft = value; setDraft(value); setPhaseNow('ready');
+      if (sendOnReady) await send();
     } catch (error) {
       if (generation !== life.current.generation || abort.signal.aborted) return;
       const value = { ...recording, transcript: '', status: 'failed' };
       life.current.draft = value; setDraft(value); setError(messageOf(error)); setPhaseNow('ready');
     }
   }
-  async function stop() {
+  async function stop(sendOnReady = false) {
     if (life.current.phase !== 'recording') return;
+    if (sendOnReady && performance.now() - life.current.recording.started < 1000) {
+      reset(false); setHint('说话时间太短，请按住至少 1 秒'); return;
+    }
+    gesture.current = null; setCancelling(false);
     setPhaseNow('transcribing');
     const generation = life.current.generation;
     try {
@@ -230,23 +257,74 @@ function VoiceInput({ ctx, sessionId, locked }) {
       const value = { ...recording, requestId: crypto.randomUUID(), recordedAt: new Date() };
       value.name = recordingName(value, value.recordedAt);
       life.current.draft = value; setDraft(value);
-      await transcribe(value, generation);
+      await transcribe(value, generation, sendOnReady);
     } catch (error) { if (generation === life.current.generation) { setError(messageOf(error)); setPhaseNow('idle'); } }
   }
   async function start() {
+    setOpen(true); setSettings(false); setHint('');
     setPhaseNow('requesting'); setError('');
     const generation = ++life.current.generation;
     const recording = new Recording(device); life.current.recording = recording;
     try {
-      await recording.start(() => void stop());
+      await recording.start(() => {
+        if (gesture.current?.cancel) { reset(); return; }
+        setHint(`已达到 ${MAX_SECONDS} 秒上限，录音已保留`);
+        void stopAtLimit.current();
+      });
       if (generation !== life.current.generation) { recording.dispose(); return; }
       setPhaseNow('recording');
       const all = await navigator.mediaDevices.enumerateDevices();
       if (generation === life.current.generation) setDevices(all.filter(d => d.kind === 'audioinput'));
-    } catch (error) { if (generation === life.current.generation) { setError(messageOf(error)); setPhaseNow('idle'); } }
+    } catch (error) { if (generation === life.current.generation) { gesture.current = null; setCancelling(false); setError(messageOf(error)); setPhaseNow('idle'); } }
+  }
+  stopAtLimit.current = stop;
+  function beginGesture(event) {
+    if (event.button !== 0 || !event.isPrimary || locked || life.current.phase !== 'idle' || life.current.draft) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gesture.current = { pointerId: event.pointerId, startY: event.clientY, cancel: false };
+    void start();
+  }
+  function moveGesture(event) {
+    const current = gesture.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    current.cancel = current.startY - event.clientY >= 64;
+    setCancelling(current.cancel);
+  }
+  function finishGesture(event) {
+    const current = gesture.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    moveGesture(event);
+    const cancel = current.cancel;
+    gesture.current = null;
+    setCancelling(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (cancel) reset();
+    else if (life.current.phase === 'recording') void stop(true);
+    else if (life.current.phase === 'requesting') {
+      reset(false);
+      setHint('麦克风准备中，请允许录音后重新按住说话');
+    }
+  }
+  function cancelGesture(event) {
+    if (gesture.current?.pointerId === event.pointerId) reset();
+  }
+  function keyDown(event) {
+    if (![' ', 'Enter'].includes(event.key)) return;
+    event.preventDefault();
+    if (event.repeat || gesture.current || locked || life.current.phase !== 'idle' || life.current.draft) return;
+    gesture.current = { key: event.key };
+    void start();
+  }
+  function keyUp(event) {
+    if (gesture.current?.key !== event.key) return;
+    event.preventDefault(); gesture.current = null;
+    if (life.current.phase === 'recording') void stop(true);
+    else if (life.current.phase === 'requesting') { reset(false); setHint('麦克风准备中，请允许录音后重新按住说话'); }
   }
   async function send() {
     if (life.current.phase !== 'ready') return;
+    if (locked) { setError('当前会话暂时无法发送，录音已保留'); return; }
     const generation = life.current.generation;
     const value = life.current.draft;
     setPhaseNow('sending'); setError('');
@@ -268,35 +346,62 @@ function VoiceInput({ ctx, sessionId, locked }) {
       await refreshCatalog();
     } catch (error) { setSetupError(messageOf(error)); }
   }
+  const recordingActive = ['requesting', 'recording'].includes(phase);
   return h('div', { ref: anchor, className: 'dsh-voice-input', key: sessionId },
-    h('button', { type: 'button', disabled: locked && !open, 'aria-label': '语音消息', 'aria-expanded': open, onClick: () => { if (!busy && !draft) setOpen(!open); } }, '语音'),
-    open && createPortal(h('section', { className: 'dsh-voice-panel', style: panelPosition ?? { visibility: 'hidden' }, 'aria-label': '录制语音消息' },
-      h('strong', null, '语音消息'),
-      devices.length > 1 && h('label', null, '麦克风 ', h('select', { value: device, disabled: busy || !!draft, onChange: e => setDevice(e.target.value) }, h('option', { value: '' }, '默认设备'), devices.filter(d => d.deviceId && d.deviceId !== 'default').map((d, i) => h('option', { key: d.deviceId, value: d.deviceId }, d.label || `麦克风 ${i + 1}`)))),
-      !ready && h('div', null,
+    h('button', {
+      type: 'button', className: `dsh-voice-hold${recordingActive ? ' is-held' : ''}`,
+      disabled: locked || ['transcribing', 'sending', 'ready'].includes(phase),
+      'aria-label': '按住说话，松开发送，上滑取消',
+      'aria-pressed': recordingActive, title: '按住说话，松开发送；上滑或按 Esc 取消',
+      onPointerDown: beginGesture, onPointerMove: moveGesture, onPointerUp: finishGesture,
+      onPointerCancel: cancelGesture, onLostPointerCapture: cancelGesture,
+      onContextMenu: event => event.preventDefault(), onKeyDown: keyDown, onKeyUp: keyUp,
+      onBlur: () => { if (gesture.current?.key) reset(); },
+      onClick: event => event.preventDefault(),
+    }, h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, 'aria-hidden': true },
+      h('rect', { x: 9, y: 2, width: 6, height: 12, rx: 3 }),
+      h('path', { d: 'M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8' })),
+      phase === 'transcribing' ? '转写中…' : phase === 'sending' ? '发送中…' : cancelling ? '松开取消' : recordingActive ? '松开发送' : '按住说话'),
+    h('button', { type: 'button', className: 'dsh-voice-settings', 'aria-label': '语音设置', disabled: busy || !!draft,
+      onClick: () => { setSettings(!settings || !open); setOpen(!open || !settings); void refreshCatalog(); } },
+      h('svg', { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', strokeWidth: 1.8, 'aria-hidden': true },
+        h('path', { d: 'M4 7h16M4 17h16' }), h('circle', { cx: 9, cy: 7, r: 3, fill: 'var(--dsw-alias-bg-layer-1)' }), h('circle', { cx: 15, cy: 17, r: 3, fill: 'var(--dsw-alias-bg-layer-1)' }))),
+    open && createPortal(h('section', {
+      className: `dsh-voice-panel${recordingActive ? ' is-recording' : ''}${cancelling ? ' is-cancelling' : ''}`,
+      style: panelPosition ?? { visibility: 'hidden' }, 'aria-label': '录制语音消息',
+    },
+      !recordingActive && h('div', { className: 'dsh-voice-panel-header' },
+        h('strong', null, settings ? '语音设置' : phase === 'sending' ? '发送语音' : '语音消息'),
+        h('button', { type: 'button', className: 'dsh-voice-close', 'aria-label': '取消', disabled: phase === 'sending', onClick: () => reset() }, '×')),
+      recordingActive && h('div', { className: 'dsh-voice-recording', role: 'status' },
+        h('span', { className: 'dsh-voice-recording-dot', 'aria-hidden': true }),
+        h('span', { className: 'dsh-voice-time' }, phase === 'requesting' ? '准备麦克风…' : `${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, '0')}`),
+        h('strong', null, cancelling ? '松开取消' : phase === 'requesting' ? '等待麦克风权限…' : '正在录音'),
+        h('span', { className: 'dsh-voice-meta' }, cancelling ? '移回原处继续录音' : '松开发送，上滑取消')),
+      settings && h(React.Fragment, null,
+        devices.length > 1 && h('label', null, '麦克风', h('select', { value: device, disabled: busy || !!draft, onChange: e => setDevice(e.target.value) }, h('option', { value: '' }, '默认设备'), devices.filter(d => d.deviceId && d.deviceId !== 'default').map((d, i) => h('option', { key: d.deviceId, value: d.deviceId }, d.label || `麦克风 ${i + 1}`)))),
+        ready && h('p', { className: 'dsh-voice-meta' }, '本地转写已就绪')),
+      !recordingActive && !ready && h('div', { className: 'dsh-voice-setup' },
         h('p', null, provider ? `本地转写：${PREPARATION_TEXT[provider.preparation.phase] || '正在准备'}` : '本地转写服务未就绪'),
         provider?.downloadSources?.length > 0 && h('select', { 'aria-label': '模型下载来源', value: source, onChange: e => setSource(e.target.value) }, h('option', { value: '' }, '选择下载来源'), provider.downloadSources.map(s => h('option', { key: s, value: s }, s))),
         provider && h('button', { type: 'button', disabled: busy || (!!provider.downloadSources?.length && !source), onClick: prepare }, '下载并准备本地转写'),
         h('button', { type: 'button', disabled: busy, onClick: refreshCatalog }, '检查准备状态')),
-      (setupError || provider?.preparation.phase === 'failed') && h('p', { role: 'alert' }, setupError || provider.preparation.message),
-      phase === 'idle' && h('button', { type: 'button', disabled: locked, onClick: start }, '开始录音'),
-      phase === 'requesting' && h('p', { role: 'status' }, '等待麦克风权限…'),
-      phase === 'recording' && h(React.Fragment, null, h('p', { role: 'status' }, `正在录音 ${elapsed.toFixed(1)} / ${MAX_SECONDS}s`), h('button', { type: 'button', onClick: stop }, '停止录音')),
-      phase === 'transcribing' && h('p', { role: 'status' }, '正在转写…'),
-      phase === 'sending' && h('p', { role: 'status' }, '正在发送…'),
-      draft && h(React.Fragment, null,
+      !recordingActive && (setupError || provider?.preparation.phase === 'failed') && h('p', { role: 'alert' }, setupError || provider.preparation.message),
+      phase === 'transcribing' && h('p', { className: 'dsh-voice-progress', role: 'status' }, willSend ? '正在转写，完成后发送…' : '正在转写…'),
+      phase === 'sending' && h('p', { className: 'dsh-voice-progress', role: 'status' }, '正在发送…'),
+      hint && !recordingActive && h('p', { role: 'status', className: 'dsh-voice-meta' }, hint),
+      draft && phase === 'ready' && h(React.Fragment, null,
         h('audio', { controls: true, src: preview, 'aria-label': '待发送录音' }),
-        h('p', null, STATUS_TEXT[draft.status] || '等待转写'),
+        h('p', { className: 'dsh-voice-meta' }, STATUS_TEXT[draft.status] || '等待转写'),
         draft.transcript && h('pre', null, draft.transcript),
-        phase === 'ready' && h('div', { className: 'dsh-voice-actions' },
-          h('button', { type: 'button', disabled: locked, onClick: send }, draft.status === 'failed' ? '仅发送原音' : '发送语音'),
-          draft.status === 'failed' && h('button', { type: 'button', disabled: !ready, onClick: () => transcribe(life.current.draft) }, '重试转写'))),
-      error && h('p', { role: 'alert' }, error),
-      h('button', { type: 'button', disabled: phase === 'sending', onClick: () => reset() }, '取消')), document.body));
+        h('div', { className: 'dsh-voice-actions' },
+          h('button', { type: 'button', className: 'dsh-voice-send', disabled: locked, onClick: send }, draft.status === 'failed' ? '仅发送原音' : '发送语音'),
+          draft.status === 'failed' && h('button', { type: 'button', disabled: !ready, onClick: () => transcribe(life.current.draft, life.current.generation, true) }, '重试转写并发送'))),
+      error && h('p', { role: 'alert' }, error)), document.body));
 }
 
 const CSS = `
-.dsh-voice-input{position:relative;display:inline-flex;color:var(--dsw-alias-label-primary)}
+.dsh-voice-input{position:relative;display:inline-flex;align-items:center;gap:2px;color:var(--dsw-alias-label-primary)}
 .dsh-voice-panel,.dsh-voice-card{box-sizing:border-box;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:12px;padding:12px;font-size:14px;line-height:1.5;color-scheme:light}
 .dsh-voice-panel{position:fixed;overflow:auto;z-index:1000;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
 .dsh-voice-card{max-width:min(360px,100%);display:grid;gap:8px}
@@ -313,6 +418,22 @@ body[data-ds-dark-theme] .dsh-voice-panel,body[data-ds-dark-theme] .dsh-voice-ca
 .dsh-voice-panel [role=alert],.dsh-voice-card [role=alert]{color:var(--dsw-alias-state-error-primary)}
 .dsh-voice-card input[type=range]{accent-color:var(--dsw-alias-state-business-primary)}
 .dsh-voice-meta{font-size:13px;color:var(--dsw-alias-label-secondary)}
+.dsh-voice-input .dsh-voice-hold{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:6px 10px;white-space:nowrap;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.dsh-voice-input .dsh-voice-hold.is-held{background:var(--dsw-alias-interactive-bg-hover-solid);box-shadow:inset 0 0 0 1px var(--dsw-alias-state-business-primary)}
+.dsh-voice-input .dsh-voice-settings{display:inline-flex;align-items:center;justify-content:center;width:28px;min-height:36px;padding:4px;border:0;background:transparent}
+.dsh-voice-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dsh-voice-panel .dsh-voice-close{display:grid;place-items:center;font-size:22px;line-height:1;width:28px;height:28px;padding:0;border:0;background:transparent}
+.dsh-voice-panel.is-recording{pointer-events:none;padding:24px 16px;box-shadow:0 8px 32px #0003}
+.dsh-voice-panel.is-cancelling{border-color:var(--dsw-alias-state-error-primary)}
+.dsh-voice-recording{display:flex;align-items:center;flex-direction:column;gap:8px;text-align:center}
+.dsh-voice-time{font-size:28px;line-height:1.3;font-variant-numeric:tabular-nums;font-weight:600}
+.dsh-voice-recording-dot{width:10px;height:10px;border-radius:50%;background:var(--dsw-alias-state-business-primary);animation:dsh-voice-pulse 1s ease-in-out infinite}
+.is-cancelling .dsh-voice-recording-dot{background:var(--dsw-alias-state-error-primary);animation:none}
+.dsh-voice-setup{display:grid;gap:8px}
+.dsh-voice-progress{padding:12px 0}
+.dsh-voice-panel .dsh-voice-send{font-weight:600;border-color:var(--dsw-alias-state-business-primary)}
+@keyframes dsh-voice-pulse{50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.dsh-voice-recording-dot{animation:none}}
 `;
 
 export function apply(ctx) {

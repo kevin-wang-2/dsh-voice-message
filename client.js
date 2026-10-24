@@ -388,6 +388,12 @@ function VoiceInput({ ctx, sessionId, locked }) {
   const [draft, setDraft] = (0, import_react2.useState)(null);
   const [elapsed, setElapsed] = (0, import_react2.useState)(0);
   const [preview, setPreview] = (0, import_react2.useState)("");
+  const [settings, setSettings] = (0, import_react2.useState)(false);
+  const [cancelling, setCancelling] = (0, import_react2.useState)(false);
+  const [hint, setHint] = (0, import_react2.useState)("");
+  const [willSend, setWillSend] = (0, import_react2.useState)(false);
+  const gesture = (0, import_react2.useRef)(null);
+  const stopAtLimit = (0, import_react2.useRef)();
   const life = (0, import_react2.useRef)({ generation: 0, recording: null, abort: null, draft: null, phase: "idle" });
   const provider = catalog?.providers.find((p) => p.id === catalog.selection.providerId && p.location === "host-local") ?? catalog?.providers.find((p) => p.location === "host-local");
   const ready = ["ready", "standby"].includes(provider?.preparation.phase);
@@ -397,6 +403,11 @@ function VoiceInput({ ctx, sessionId, locked }) {
     setPhase(value);
   };
   function reset(close = true) {
+    gesture.current = null;
+    setCancelling(false);
+    setSettings(false);
+    setHint("");
+    setWillSend(false);
     life.current.generation++;
     life.current.abort?.abort();
     life.current.recording?.dispose();
@@ -449,8 +460,10 @@ function VoiceInput({ ctx, sessionId, locked }) {
     };
   }, [open]);
   (0, import_react2.useEffect)(() => {
+    void refreshCatalog();
+  }, []);
+  (0, import_react2.useEffect)(() => {
     if (open) {
-      void refreshCatalog();
       navigator.mediaDevices?.enumerateDevices().then((all) => setDevices(all.filter((d) => d.kind === "audioinput"))).catch(() => {
       });
     }
@@ -462,7 +475,10 @@ function VoiceInput({ ctx, sessionId, locked }) {
   }, [open, provider?.preparation.phase]);
   (0, import_react2.useEffect)(() => {
     if (phase !== "recording") return;
-    const timer = setInterval(() => setElapsed(Math.min(MAX_SECONDS, (performance.now() - life.current.recording.started) / 1e3)), 200);
+    const recording = life.current.recording;
+    const timer = setInterval(() => {
+      if (life.current.phase === "recording" && life.current.recording === recording) setElapsed(Math.min(MAX_SECONDS, (performance.now() - recording.started) / 1e3));
+    }, 200);
     return () => clearInterval(timer);
   }, [phase]);
   (0, import_react2.useEffect)(() => {
@@ -478,15 +494,33 @@ function VoiceInput({ ctx, sessionId, locked }) {
     const hidden = () => {
       if (document.hidden && ["requesting", "recording"].includes(life.current.phase)) reset();
     };
+    const interrupted = () => {
+      if (["requesting", "recording"].includes(life.current.phase)) reset();
+    };
     document.addEventListener("visibilitychange", hidden);
+    window.addEventListener("blur", interrupted);
     return () => {
       document.removeEventListener("visibilitychange", hidden);
+      window.removeEventListener("blur", interrupted);
+      gesture.current = null;
       life.current.generation++;
       life.current.abort?.abort();
       life.current.recording?.dispose();
     };
   }, [sessionId]);
-  async function transcribe(recording, generation = life.current.generation) {
+  (0, import_react2.useEffect)(() => {
+    if (!open) return;
+    const escape = (event) => {
+      if (event.key === "Escape" && life.current.phase !== "sending") {
+        event.preventDefault();
+        reset();
+      }
+    };
+    document.addEventListener("keydown", escape);
+    return () => document.removeEventListener("keydown", escape);
+  }, [open]);
+  async function transcribe(recording, generation = life.current.generation, sendOnReady = false) {
+    setWillSend(sendOnReady);
     setPhaseNow("transcribing");
     setError("");
     const abort = new AbortController();
@@ -504,6 +538,7 @@ function VoiceInput({ ctx, sessionId, locked }) {
       life.current.draft = value;
       setDraft(value);
       setPhaseNow("ready");
+      if (sendOnReady) await send();
     } catch (error2) {
       if (generation !== life.current.generation || abort.signal.aborted) return;
       const value = { ...recording, transcript: "", status: "failed" };
@@ -513,8 +548,15 @@ function VoiceInput({ ctx, sessionId, locked }) {
       setPhaseNow("ready");
     }
   }
-  async function stop() {
+  async function stop(sendOnReady = false) {
     if (life.current.phase !== "recording") return;
+    if (sendOnReady && performance.now() - life.current.recording.started < 1e3) {
+      reset(false);
+      setHint("\u8BF4\u8BDD\u65F6\u95F4\u592A\u77ED\uFF0C\u8BF7\u6309\u4F4F\u81F3\u5C11 1 \u79D2");
+      return;
+    }
+    gesture.current = null;
+    setCancelling(false);
     setPhaseNow("transcribing");
     const generation = life.current.generation;
     try {
@@ -524,7 +566,7 @@ function VoiceInput({ ctx, sessionId, locked }) {
       value.name = recordingName(value, value.recordedAt);
       life.current.draft = value;
       setDraft(value);
-      await transcribe(value, generation);
+      await transcribe(value, generation, sendOnReady);
     } catch (error2) {
       if (generation === life.current.generation) {
         setError(messageOf(error2));
@@ -533,13 +575,23 @@ function VoiceInput({ ctx, sessionId, locked }) {
     }
   }
   async function start() {
+    setOpen(true);
+    setSettings(false);
+    setHint("");
     setPhaseNow("requesting");
     setError("");
     const generation = ++life.current.generation;
     const recording = new Recording(device);
     life.current.recording = recording;
     try {
-      await recording.start(() => void stop());
+      await recording.start(() => {
+        if (gesture.current?.cancel) {
+          reset();
+          return;
+        }
+        setHint(`\u5DF2\u8FBE\u5230 ${MAX_SECONDS} \u79D2\u4E0A\u9650\uFF0C\u5F55\u97F3\u5DF2\u4FDD\u7559`);
+        void stopAtLimit.current();
+      });
       if (generation !== life.current.generation) {
         recording.dispose();
         return;
@@ -549,13 +601,68 @@ function VoiceInput({ ctx, sessionId, locked }) {
       if (generation === life.current.generation) setDevices(all.filter((d) => d.kind === "audioinput"));
     } catch (error2) {
       if (generation === life.current.generation) {
+        gesture.current = null;
+        setCancelling(false);
         setError(messageOf(error2));
         setPhaseNow("idle");
       }
     }
   }
+  stopAtLimit.current = stop;
+  function beginGesture(event) {
+    if (event.button !== 0 || !event.isPrimary || locked || life.current.phase !== "idle" || life.current.draft) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gesture.current = { pointerId: event.pointerId, startY: event.clientY, cancel: false };
+    void start();
+  }
+  function moveGesture(event) {
+    const current = gesture.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    current.cancel = current.startY - event.clientY >= 64;
+    setCancelling(current.cancel);
+  }
+  function finishGesture(event) {
+    const current = gesture.current;
+    if (!current || current.pointerId !== event.pointerId) return;
+    moveGesture(event);
+    const cancel = current.cancel;
+    gesture.current = null;
+    setCancelling(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+    if (cancel) reset();
+    else if (life.current.phase === "recording") void stop(true);
+    else if (life.current.phase === "requesting") {
+      reset(false);
+      setHint("\u9EA6\u514B\u98CE\u51C6\u5907\u4E2D\uFF0C\u8BF7\u5141\u8BB8\u5F55\u97F3\u540E\u91CD\u65B0\u6309\u4F4F\u8BF4\u8BDD");
+    }
+  }
+  function cancelGesture(event) {
+    if (gesture.current?.pointerId === event.pointerId) reset();
+  }
+  function keyDown(event) {
+    if (![" ", "Enter"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.repeat || gesture.current || locked || life.current.phase !== "idle" || life.current.draft) return;
+    gesture.current = { key: event.key };
+    void start();
+  }
+  function keyUp(event) {
+    if (gesture.current?.key !== event.key) return;
+    event.preventDefault();
+    gesture.current = null;
+    if (life.current.phase === "recording") void stop(true);
+    else if (life.current.phase === "requesting") {
+      reset(false);
+      setHint("\u9EA6\u514B\u98CE\u51C6\u5907\u4E2D\uFF0C\u8BF7\u5141\u8BB8\u5F55\u97F3\u540E\u91CD\u65B0\u6309\u4F4F\u8BF4\u8BDD");
+    }
+  }
   async function send() {
     if (life.current.phase !== "ready") return;
+    if (locked) {
+      setError("\u5F53\u524D\u4F1A\u8BDD\u6682\u65F6\u65E0\u6CD5\u53D1\u9001\uFF0C\u5F55\u97F3\u5DF2\u4FDD\u7559");
+      return;
+    }
     const generation = life.current.generation;
     const value = life.current.draft;
     setPhaseNow("sending");
@@ -585,51 +692,119 @@ function VoiceInput({ ctx, sessionId, locked }) {
       setSetupError(messageOf(error2));
     }
   }
+  const recordingActive = ["requesting", "recording"].includes(phase);
   return h(
     "div",
     { ref: anchor, className: "dsh-voice-input", key: sessionId },
-    h("button", { type: "button", disabled: locked && !open, "aria-label": "\u8BED\u97F3\u6D88\u606F", "aria-expanded": open, onClick: () => {
-      if (!busy && !draft) setOpen(!open);
-    } }, "\u8BED\u97F3"),
+    h(
+      "button",
+      {
+        type: "button",
+        className: `dsh-voice-hold${recordingActive ? " is-held" : ""}`,
+        disabled: locked || ["transcribing", "sending", "ready"].includes(phase),
+        "aria-label": "\u6309\u4F4F\u8BF4\u8BDD\uFF0C\u677E\u5F00\u53D1\u9001\uFF0C\u4E0A\u6ED1\u53D6\u6D88",
+        "aria-pressed": recordingActive,
+        title: "\u6309\u4F4F\u8BF4\u8BDD\uFF0C\u677E\u5F00\u53D1\u9001\uFF1B\u4E0A\u6ED1\u6216\u6309 Esc \u53D6\u6D88",
+        onPointerDown: beginGesture,
+        onPointerMove: moveGesture,
+        onPointerUp: finishGesture,
+        onPointerCancel: cancelGesture,
+        onLostPointerCapture: cancelGesture,
+        onContextMenu: (event) => event.preventDefault(),
+        onKeyDown: keyDown,
+        onKeyUp: keyUp,
+        onBlur: () => {
+          if (gesture.current?.key) reset();
+        },
+        onClick: (event) => event.preventDefault()
+      },
+      h(
+        "svg",
+        { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, "aria-hidden": true },
+        h("rect", { x: 9, y: 2, width: 6, height: 12, rx: 3 }),
+        h("path", { d: "M5 10v2a7 7 0 0 0 14 0v-2M12 19v3M8 22h8" })
+      ),
+      phase === "transcribing" ? "\u8F6C\u5199\u4E2D\u2026" : phase === "sending" ? "\u53D1\u9001\u4E2D\u2026" : cancelling ? "\u677E\u5F00\u53D6\u6D88" : recordingActive ? "\u677E\u5F00\u53D1\u9001" : "\u6309\u4F4F\u8BF4\u8BDD"
+    ),
+    h(
+      "button",
+      {
+        type: "button",
+        className: "dsh-voice-settings",
+        "aria-label": "\u8BED\u97F3\u8BBE\u7F6E",
+        disabled: busy || !!draft,
+        onClick: () => {
+          setSettings(!settings || !open);
+          setOpen(!open || !settings);
+          void refreshCatalog();
+        }
+      },
+      h(
+        "svg",
+        { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, "aria-hidden": true },
+        h("path", { d: "M4 7h16M4 17h16" }),
+        h("circle", { cx: 9, cy: 7, r: 3, fill: "var(--dsw-alias-bg-layer-1)" }),
+        h("circle", { cx: 15, cy: 17, r: 3, fill: "var(--dsw-alias-bg-layer-1)" })
+      )
+    ),
     open && (0, import_react_dom.createPortal)(h(
       "section",
-      { className: "dsh-voice-panel", style: panelPosition ?? { visibility: "hidden" }, "aria-label": "\u5F55\u5236\u8BED\u97F3\u6D88\u606F" },
-      h("strong", null, "\u8BED\u97F3\u6D88\u606F"),
-      devices.length > 1 && h("label", null, "\u9EA6\u514B\u98CE ", h("select", { value: device, disabled: busy || !!draft, onChange: (e) => setDevice(e.target.value) }, h("option", { value: "" }, "\u9ED8\u8BA4\u8BBE\u5907"), devices.filter((d) => d.deviceId && d.deviceId !== "default").map((d, i) => h("option", { key: d.deviceId, value: d.deviceId }, d.label || `\u9EA6\u514B\u98CE ${i + 1}`)))),
-      !ready && h(
+      {
+        className: `dsh-voice-panel${recordingActive ? " is-recording" : ""}${cancelling ? " is-cancelling" : ""}`,
+        style: panelPosition ?? { visibility: "hidden" },
+        "aria-label": "\u5F55\u5236\u8BED\u97F3\u6D88\u606F"
+      },
+      !recordingActive && h(
         "div",
+        { className: "dsh-voice-panel-header" },
+        h("strong", null, settings ? "\u8BED\u97F3\u8BBE\u7F6E" : phase === "sending" ? "\u53D1\u9001\u8BED\u97F3" : "\u8BED\u97F3\u6D88\u606F"),
+        h("button", { type: "button", className: "dsh-voice-close", "aria-label": "\u53D6\u6D88", disabled: phase === "sending", onClick: () => reset() }, "\xD7")
+      ),
+      recordingActive && h(
+        "div",
+        { className: "dsh-voice-recording", role: "status" },
+        h("span", { className: "dsh-voice-recording-dot", "aria-hidden": true }),
+        h("span", { className: "dsh-voice-time" }, phase === "requesting" ? "\u51C6\u5907\u9EA6\u514B\u98CE\u2026" : `${Math.floor(elapsed / 60)}:${String(Math.floor(elapsed % 60)).padStart(2, "0")}`),
+        h("strong", null, cancelling ? "\u677E\u5F00\u53D6\u6D88" : phase === "requesting" ? "\u7B49\u5F85\u9EA6\u514B\u98CE\u6743\u9650\u2026" : "\u6B63\u5728\u5F55\u97F3"),
+        h("span", { className: "dsh-voice-meta" }, cancelling ? "\u79FB\u56DE\u539F\u5904\u7EE7\u7EED\u5F55\u97F3" : "\u677E\u5F00\u53D1\u9001\uFF0C\u4E0A\u6ED1\u53D6\u6D88")
+      ),
+      settings && h(
+        import_react2.default.Fragment,
         null,
+        devices.length > 1 && h("label", null, "\u9EA6\u514B\u98CE", h("select", { value: device, disabled: busy || !!draft, onChange: (e) => setDevice(e.target.value) }, h("option", { value: "" }, "\u9ED8\u8BA4\u8BBE\u5907"), devices.filter((d) => d.deviceId && d.deviceId !== "default").map((d, i) => h("option", { key: d.deviceId, value: d.deviceId }, d.label || `\u9EA6\u514B\u98CE ${i + 1}`)))),
+        ready && h("p", { className: "dsh-voice-meta" }, "\u672C\u5730\u8F6C\u5199\u5DF2\u5C31\u7EEA")
+      ),
+      !recordingActive && !ready && h(
+        "div",
+        { className: "dsh-voice-setup" },
         h("p", null, provider ? `\u672C\u5730\u8F6C\u5199\uFF1A${PREPARATION_TEXT[provider.preparation.phase] || "\u6B63\u5728\u51C6\u5907"}` : "\u672C\u5730\u8F6C\u5199\u670D\u52A1\u672A\u5C31\u7EEA"),
         provider?.downloadSources?.length > 0 && h("select", { "aria-label": "\u6A21\u578B\u4E0B\u8F7D\u6765\u6E90", value: source, onChange: (e) => setSource(e.target.value) }, h("option", { value: "" }, "\u9009\u62E9\u4E0B\u8F7D\u6765\u6E90"), provider.downloadSources.map((s) => h("option", { key: s, value: s }, s))),
         provider && h("button", { type: "button", disabled: busy || !!provider.downloadSources?.length && !source, onClick: prepare }, "\u4E0B\u8F7D\u5E76\u51C6\u5907\u672C\u5730\u8F6C\u5199"),
         h("button", { type: "button", disabled: busy, onClick: refreshCatalog }, "\u68C0\u67E5\u51C6\u5907\u72B6\u6001")
       ),
-      (setupError || provider?.preparation.phase === "failed") && h("p", { role: "alert" }, setupError || provider.preparation.message),
-      phase === "idle" && h("button", { type: "button", disabled: locked, onClick: start }, "\u5F00\u59CB\u5F55\u97F3"),
-      phase === "requesting" && h("p", { role: "status" }, "\u7B49\u5F85\u9EA6\u514B\u98CE\u6743\u9650\u2026"),
-      phase === "recording" && h(import_react2.default.Fragment, null, h("p", { role: "status" }, `\u6B63\u5728\u5F55\u97F3 ${elapsed.toFixed(1)} / ${MAX_SECONDS}s`), h("button", { type: "button", onClick: stop }, "\u505C\u6B62\u5F55\u97F3")),
-      phase === "transcribing" && h("p", { role: "status" }, "\u6B63\u5728\u8F6C\u5199\u2026"),
-      phase === "sending" && h("p", { role: "status" }, "\u6B63\u5728\u53D1\u9001\u2026"),
-      draft && h(
+      !recordingActive && (setupError || provider?.preparation.phase === "failed") && h("p", { role: "alert" }, setupError || provider.preparation.message),
+      phase === "transcribing" && h("p", { className: "dsh-voice-progress", role: "status" }, willSend ? "\u6B63\u5728\u8F6C\u5199\uFF0C\u5B8C\u6210\u540E\u53D1\u9001\u2026" : "\u6B63\u5728\u8F6C\u5199\u2026"),
+      phase === "sending" && h("p", { className: "dsh-voice-progress", role: "status" }, "\u6B63\u5728\u53D1\u9001\u2026"),
+      hint && !recordingActive && h("p", { role: "status", className: "dsh-voice-meta" }, hint),
+      draft && phase === "ready" && h(
         import_react2.default.Fragment,
         null,
         h("audio", { controls: true, src: preview, "aria-label": "\u5F85\u53D1\u9001\u5F55\u97F3" }),
-        h("p", null, STATUS_TEXT[draft.status] || "\u7B49\u5F85\u8F6C\u5199"),
+        h("p", { className: "dsh-voice-meta" }, STATUS_TEXT[draft.status] || "\u7B49\u5F85\u8F6C\u5199"),
         draft.transcript && h("pre", null, draft.transcript),
-        phase === "ready" && h(
+        h(
           "div",
           { className: "dsh-voice-actions" },
-          h("button", { type: "button", disabled: locked, onClick: send }, draft.status === "failed" ? "\u4EC5\u53D1\u9001\u539F\u97F3" : "\u53D1\u9001\u8BED\u97F3"),
-          draft.status === "failed" && h("button", { type: "button", disabled: !ready, onClick: () => transcribe(life.current.draft) }, "\u91CD\u8BD5\u8F6C\u5199")
+          h("button", { type: "button", className: "dsh-voice-send", disabled: locked, onClick: send }, draft.status === "failed" ? "\u4EC5\u53D1\u9001\u539F\u97F3" : "\u53D1\u9001\u8BED\u97F3"),
+          draft.status === "failed" && h("button", { type: "button", disabled: !ready, onClick: () => transcribe(life.current.draft, life.current.generation, true) }, "\u91CD\u8BD5\u8F6C\u5199\u5E76\u53D1\u9001")
         )
       ),
-      error && h("p", { role: "alert" }, error),
-      h("button", { type: "button", disabled: phase === "sending", onClick: () => reset() }, "\u53D6\u6D88")
+      error && h("p", { role: "alert" }, error)
     ), document.body)
   );
 }
 var CSS = `
-.dsh-voice-input{position:relative;display:inline-flex;color:var(--dsw-alias-label-primary)}
+.dsh-voice-input{position:relative;display:inline-flex;align-items:center;gap:2px;color:var(--dsw-alias-label-primary)}
 .dsh-voice-panel,.dsh-voice-card{box-sizing:border-box;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l1);border-radius:12px;padding:12px;font-size:14px;line-height:1.5;color-scheme:light}
 .dsh-voice-panel{position:fixed;overflow:auto;z-index:1000;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
 .dsh-voice-card{max-width:min(360px,100%);display:grid;gap:8px}
@@ -646,6 +821,22 @@ body[data-ds-dark-theme] .dsh-voice-panel,body[data-ds-dark-theme] .dsh-voice-ca
 .dsh-voice-panel [role=alert],.dsh-voice-card [role=alert]{color:var(--dsw-alias-state-error-primary)}
 .dsh-voice-card input[type=range]{accent-color:var(--dsw-alias-state-business-primary)}
 .dsh-voice-meta{font-size:13px;color:var(--dsw-alias-label-secondary)}
+.dsh-voice-input .dsh-voice-hold{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:6px 10px;white-space:nowrap;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.dsh-voice-input .dsh-voice-hold.is-held{background:var(--dsw-alias-interactive-bg-hover-solid);box-shadow:inset 0 0 0 1px var(--dsw-alias-state-business-primary)}
+.dsh-voice-input .dsh-voice-settings{display:inline-flex;align-items:center;justify-content:center;width:28px;min-height:36px;padding:4px;border:0;background:transparent}
+.dsh-voice-panel-header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.dsh-voice-panel .dsh-voice-close{display:grid;place-items:center;font-size:22px;line-height:1;width:28px;height:28px;padding:0;border:0;background:transparent}
+.dsh-voice-panel.is-recording{pointer-events:none;padding:24px 16px;box-shadow:0 8px 32px #0003}
+.dsh-voice-panel.is-cancelling{border-color:var(--dsw-alias-state-error-primary)}
+.dsh-voice-recording{display:flex;align-items:center;flex-direction:column;gap:8px;text-align:center}
+.dsh-voice-time{font-size:28px;line-height:1.3;font-variant-numeric:tabular-nums;font-weight:600}
+.dsh-voice-recording-dot{width:10px;height:10px;border-radius:50%;background:var(--dsw-alias-state-business-primary);animation:dsh-voice-pulse 1s ease-in-out infinite}
+.is-cancelling .dsh-voice-recording-dot{background:var(--dsw-alias-state-error-primary);animation:none}
+.dsh-voice-setup{display:grid;gap:8px}
+.dsh-voice-progress{padding:12px 0}
+.dsh-voice-panel .dsh-voice-send{font-weight:600;border-color:var(--dsw-alias-state-business-primary)}
+@keyframes dsh-voice-pulse{50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.dsh-voice-recording-dot{animation:none}}
 `;
 function apply(ctx) {
   ctx.effect(() => {
