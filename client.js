@@ -284,12 +284,13 @@ function VoicePlayer({ voice, sessionId }) {
     const r = resources.current;
     if (loading || r.source) return;
     setError("");
-    r.context ??= new AudioContext();
-    const resumed = r.context.resume();
+    r.abort ??= new AbortController();
     try {
+      r.context ??= new AudioContext();
+      await r.context.resume();
+      r.abort.signal.throwIfAborted();
       if (!r.buffer) {
         setLoading(true);
-        r.abort = new AbortController();
         const response = await fetch(`${AUDIO_PATH}?${new URLSearchParams({ sessionId, attachmentId: voice.meta.attachmentId })}`, { signal: r.abort.signal, credentials: "same-origin" });
         if (!response.ok) throw new Error("\u539F\u59CB\u97F3\u9891\u6682\u65F6\u65E0\u6CD5\u8BFB\u53D6\uFF0C\u8BF7\u68C0\u67E5\u8FDE\u63A5\u6216\u9644\u4EF6\u662F\u5426\u4ECD\u5B58\u5728");
         const buffer = await r.context.decodeAudioData(await response.arrayBuffer());
@@ -298,8 +299,7 @@ function VoicePlayer({ voice, sessionId }) {
         setDuration(buffer.duration);
         setLoaded(true);
       }
-      await resumed;
-      r.abort?.signal.throwIfAborted();
+      r.abort.signal.throwIfAborted();
       if (r.offset >= r.buffer.duration) r.offset = 0;
       startSource();
     } catch (error2) {
@@ -598,7 +598,7 @@ var CSS = `
 .dsh-voice-panel,.dsh-voice-card{box-sizing:border-box;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-background-primary,#fff);border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:12px;padding:12px;font-size:14px;line-height:1.5}
 .dsh-voice-panel{position:absolute;bottom:calc(100% + 8px);right:0;width:min(360px,calc(100vw - 32px));max-height:65vh;overflow:auto;z-index:20;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
 .dsh-voice-card{max-width:min(360px,100%);display:grid;gap:8px}
-.dsh-voice-card audio,.dsh-voice-panel audio{width:100%;min-width:0}
+.dsh-voice-panel audio{width:100%;min-width:0}
 .dsh-voice-card pre,.dsh-voice-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0}
 .dsh-voice-panel p{margin:0}.dsh-voice-actions{display:flex;flex-wrap:wrap;gap:8px}
 .dsh-voice-input button,.dsh-voice-card button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:6px;background:transparent;padding:4px 8px;cursor:pointer}
