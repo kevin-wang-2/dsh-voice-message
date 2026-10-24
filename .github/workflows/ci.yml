@@ -19,7 +19,7 @@ jobs:
           - os: ubuntu-latest
             label: Linux Chromium
             browsers: chromium
-            command: node --test --test-name-pattern='^(?!WebKit:)' test/*.test.mjs
+            command: node --test --test-skip-pattern='WebKit:' test/*.test.mjs
           - os: macos-latest
             label: macOS Chromium and WebKit
             browsers: chromium webkit
