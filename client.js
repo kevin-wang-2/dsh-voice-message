@@ -35,6 +35,7 @@ __export(client_exports, {
 });
 module.exports = __toCommonJS(client_exports);
 var import_react2 = __toESM(require("react"), 1);
+var import_react_dom = require("react-dom");
 
 // lib/contract.js
 var MARKER = "[dsh-voice-message:v1] ";
@@ -375,6 +376,8 @@ function voiceRenderer(input, props, original, options) {
 }
 function VoiceInput({ ctx, sessionId, locked }) {
   const [open, setOpen] = (0, import_react2.useState)(false);
+  const anchor = (0, import_react2.useRef)();
+  const [panelPosition, setPanelPosition] = (0, import_react2.useState)(null);
   const [phase, setPhase] = (0, import_react2.useState)("idle");
   const [catalog, setCatalog] = (0, import_react2.useState)(null);
   const [setupError, setSetupError] = (0, import_react2.useState)("");
@@ -413,6 +416,38 @@ function VoiceInput({ ctx, sessionId, locked }) {
       setSetupError("\u672C\u5730\u8F6C\u5199\u670D\u52A1\u672A\u5C31\u7EEA\uFF0C\u8BF7\u68C0\u67E5\u8BED\u97F3\u63D2\u4EF6\u53CA Speech \u670D\u52A1\u662F\u5426\u5DF2\u542F\u7528");
     }
   }
+  (0, import_react2.useLayoutEffect)(() => {
+    if (!open) return;
+    const viewport = window.visualViewport;
+    function updatePosition() {
+      const rect = anchor.current.getBoundingClientRect();
+      const left = viewport?.offsetLeft ?? 0;
+      const top = viewport?.offsetTop ?? 0;
+      const width = viewport?.width ?? window.innerWidth;
+      const height = viewport?.height ?? window.innerHeight;
+      const panelWidth = Math.min(360, width - 32);
+      const above = Math.max(top + 16, Math.min(rect.top - 8, top + height - 16));
+      const below = Math.max(top + 16, Math.min(rect.bottom + 8, top + height - 16));
+      const aboveSpace = above - top - 16;
+      const belowSpace = top + height - below - 16;
+      setPanelPosition({
+        left: Math.max(left + 16, Math.min(rect.right - panelWidth, left + width - panelWidth - 16)),
+        width: panelWidth,
+        ...aboveSpace >= belowSpace ? { bottom: window.innerHeight - above, maxHeight: Math.min(height * 0.65, aboveSpace) } : { top: below, maxHeight: Math.min(height * 0.65, belowSpace) }
+      });
+    }
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    viewport?.addEventListener("resize", updatePosition);
+    viewport?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      viewport?.removeEventListener("resize", updatePosition);
+      viewport?.removeEventListener("scroll", updatePosition);
+    };
+  }, [open]);
   (0, import_react2.useEffect)(() => {
     if (open) {
       void refreshCatalog();
@@ -552,13 +587,13 @@ function VoiceInput({ ctx, sessionId, locked }) {
   }
   return h(
     "div",
-    { className: "dsh-voice-input", key: sessionId },
+    { ref: anchor, className: "dsh-voice-input", key: sessionId },
     h("button", { type: "button", disabled: locked && !open, "aria-label": "\u8BED\u97F3\u6D88\u606F", "aria-expanded": open, onClick: () => {
       if (!busy && !draft) setOpen(!open);
     } }, "\u8BED\u97F3"),
-    open && h(
+    open && (0, import_react_dom.createPortal)(h(
       "section",
-      { className: "dsh-voice-panel", "aria-label": "\u5F55\u5236\u8BED\u97F3\u6D88\u606F" },
+      { className: "dsh-voice-panel", style: panelPosition ?? { visibility: "hidden" }, "aria-label": "\u5F55\u5236\u8BED\u97F3\u6D88\u606F" },
       h("strong", null, "\u8BED\u97F3\u6D88\u606F"),
       devices.length > 1 && h("label", null, "\u9EA6\u514B\u98CE ", h("select", { value: device, disabled: busy || !!draft, onChange: (e) => setDevice(e.target.value) }, h("option", { value: "" }, "\u9ED8\u8BA4\u8BBE\u5907"), devices.filter((d) => d.deviceId && d.deviceId !== "default").map((d, i) => h("option", { key: d.deviceId, value: d.deviceId }, d.label || `\u9EA6\u514B\u98CE ${i + 1}`)))),
       !ready && h(
@@ -590,19 +625,19 @@ function VoiceInput({ ctx, sessionId, locked }) {
       ),
       error && h("p", { role: "alert" }, error),
       h("button", { type: "button", disabled: phase === "sending", onClick: () => reset() }, "\u53D6\u6D88")
-    )
+    ), document.body)
   );
 }
 var CSS = `
 .dsh-voice-input{position:relative;display:inline-flex}
 .dsh-voice-panel,.dsh-voice-card{box-sizing:border-box;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-background-primary,#fff);border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:12px;padding:12px;font-size:14px;line-height:1.5}
-.dsh-voice-panel{position:absolute;bottom:calc(100% + 8px);right:0;width:min(360px,calc(100vw - 32px));max-height:65vh;overflow:auto;z-index:20;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
+.dsh-voice-panel{position:fixed;overflow:auto;z-index:1000;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
 .dsh-voice-card{max-width:min(360px,100%);display:grid;gap:8px}
 .dsh-voice-panel audio{width:100%;min-width:0}
 .dsh-voice-card pre,.dsh-voice-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0}
 .dsh-voice-panel p{margin:0}.dsh-voice-actions{display:flex;flex-wrap:wrap;gap:8px}
-.dsh-voice-input button,.dsh-voice-card button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:6px;background:transparent;padding:4px 8px;cursor:pointer}
-.dsh-voice-input button:disabled,.dsh-voice-card button:disabled{opacity:.5;cursor:default}
+.dsh-voice-input button,.dsh-voice-panel button,.dsh-voice-card button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:6px;background:transparent;padding:4px 8px;cursor:pointer}
+.dsh-voice-input button:disabled,.dsh-voice-panel button:disabled,.dsh-voice-card button:disabled{opacity:.5;cursor:default}
 .dsh-voice-meta{font-size:13px;color:var(--dsw-alias-label-secondary)}
 `;
 function apply(ctx) {

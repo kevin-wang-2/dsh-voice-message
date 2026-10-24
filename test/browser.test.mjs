@@ -74,6 +74,10 @@ for(const [name,engine] of [['Chromium',chromium],['WebKit',webkit]]){
    const page=await boot(browser);await page.evaluate(()=>voiceTest.mode='denied');
    await page.getByRole('button',{name:'开始录音',exact:true}).click();;await page.getByText(/麦克风权限被拒绝/).waitFor();
    const box=await page.getByRole('region',{name:'录制语音消息'}).boundingBox();assert.ok(box.x>=0&&box.x+box.width<=390);
+   await page.evaluate(()=>{const anchor=document.getElementById('input');anchor.style.right='auto';anchor.style.left='12px';window.dispatchEvent(new Event('resize'));});
+   await page.waitForFunction(()=>{const rect=document.querySelector('.dsh-voice-panel').getBoundingClientRect();return rect.left>=15.5&&rect.right<=374.5;});
+   await page.evaluate(()=>{document.getElementById('input').style.bottom='auto';document.getElementById('input').style.top='24px';window.dispatchEvent(new Event('resize'));});
+   await page.waitForFunction(()=>{const rect=document.querySelector('.dsh-voice-panel').getBoundingClientRect();return rect.top>=24&&rect.bottom<=innerHeight-16;});
    await page.evaluate(()=>voiceTest.show([{type:'text',text:'ordinary message'}]));await page.getByText('ordinary message',{exact:true}).waitFor();
    assert.equal(await page.locator('.dsh-voice-card').count(),0);assert.equal(await page.evaluate(()=>voiceTest.sends.length),0);await page.close();
   }finally{await browser.close();}

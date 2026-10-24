@@ -1,4 +1,5 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AUDIO_PATH, GUIDANCE, STATUS_TEXT, buildVoiceText, matchesFile, parseVoiceText } from '../lib/contract.js';
 import { Recording, MAX_SECONDS, base64, prepareWave, recordingName } from './recording.js';
 import { wrapUserRenderer } from './wrap.js';
@@ -107,6 +108,8 @@ function voiceRenderer(input, props, original, options) {
 
 function VoiceInput({ ctx, sessionId, locked }) {
   const [open, setOpen] = useState(false);
+  const anchor = useRef();
+  const [panelPosition, setPanelPosition] = useState(null);
   const [phase, setPhase] = useState('idle');
   const [catalog, setCatalog] = useState(null);
   const [setupError, setSetupError] = useState('');
@@ -136,6 +139,40 @@ function VoiceInput({ ctx, sessionId, locked }) {
     try { setCatalog(await speechCall(ctx, 'catalog')); setSetupError(''); }
     catch { setSetupError('本地转写服务未就绪，请检查语音插件及 Speech 服务是否已启用'); }
   }
+  useLayoutEffect(() => {
+    if (!open) return;
+    const viewport = window.visualViewport;
+    function updatePosition() {
+      const rect = anchor.current.getBoundingClientRect();
+      const left = viewport?.offsetLeft ?? 0;
+      const top = viewport?.offsetTop ?? 0;
+      const width = viewport?.width ?? window.innerWidth;
+      const height = viewport?.height ?? window.innerHeight;
+      const panelWidth = Math.min(360, width - 32);
+      const above = Math.max(top + 16, Math.min(rect.top - 8, top + height - 16));
+      const below = Math.max(top + 16, Math.min(rect.bottom + 8, top + height - 16));
+      const aboveSpace = above - top - 16;
+      const belowSpace = top + height - below - 16;
+      setPanelPosition({
+        left: Math.max(left + 16, Math.min(rect.right - panelWidth, left + width - panelWidth - 16)),
+        width: panelWidth,
+        ...(aboveSpace >= belowSpace
+          ? { bottom: window.innerHeight - above, maxHeight: Math.min(height * .65, aboveSpace) }
+          : { top: below, maxHeight: Math.min(height * .65, belowSpace) }),
+      });
+    }
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    viewport?.addEventListener('resize', updatePosition);
+    viewport?.addEventListener('scroll', updatePosition);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+      viewport?.removeEventListener('resize', updatePosition);
+      viewport?.removeEventListener('scroll', updatePosition);
+    };
+  }, [open]);
   useEffect(() => {
     if (open) {
       void refreshCatalog();
@@ -231,9 +268,9 @@ function VoiceInput({ ctx, sessionId, locked }) {
       await refreshCatalog();
     } catch (error) { setSetupError(messageOf(error)); }
   }
-  return h('div', { className: 'dsh-voice-input', key: sessionId },
+  return h('div', { ref: anchor, className: 'dsh-voice-input', key: sessionId },
     h('button', { type: 'button', disabled: locked && !open, 'aria-label': '语音消息', 'aria-expanded': open, onClick: () => { if (!busy && !draft) setOpen(!open); } }, '语音'),
-    open && h('section', { className: 'dsh-voice-panel', 'aria-label': '录制语音消息' },
+    open && createPortal(h('section', { className: 'dsh-voice-panel', style: panelPosition ?? { visibility: 'hidden' }, 'aria-label': '录制语音消息' },
       h('strong', null, '语音消息'),
       devices.length > 1 && h('label', null, '麦克风 ', h('select', { value: device, disabled: busy || !!draft, onChange: e => setDevice(e.target.value) }, h('option', { value: '' }, '默认设备'), devices.filter(d => d.deviceId && d.deviceId !== 'default').map((d, i) => h('option', { key: d.deviceId, value: d.deviceId }, d.label || `麦克风 ${i + 1}`)))),
       !ready && h('div', null,
@@ -255,19 +292,19 @@ function VoiceInput({ ctx, sessionId, locked }) {
           h('button', { type: 'button', disabled: locked, onClick: send }, draft.status === 'failed' ? '仅发送原音' : '发送语音'),
           draft.status === 'failed' && h('button', { type: 'button', disabled: !ready, onClick: () => transcribe(life.current.draft) }, '重试转写'))),
       error && h('p', { role: 'alert' }, error),
-      h('button', { type: 'button', disabled: phase === 'sending', onClick: () => reset() }, '取消')));
+      h('button', { type: 'button', disabled: phase === 'sending', onClick: () => reset() }, '取消')), document.body));
 }
 
 const CSS = `
 .dsh-voice-input{position:relative;display:inline-flex}
 .dsh-voice-panel,.dsh-voice-card{box-sizing:border-box;color:var(--dsw-alias-label-primary);background:var(--dsw-alias-background-primary,#fff);border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:12px;padding:12px;font-size:14px;line-height:1.5}
-.dsh-voice-panel{position:absolute;bottom:calc(100% + 8px);right:0;width:min(360px,calc(100vw - 32px));max-height:65vh;overflow:auto;z-index:20;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
+.dsh-voice-panel{position:fixed;overflow:auto;z-index:1000;display:grid;gap:8px;box-shadow:0 4px 20px #0002}
 .dsh-voice-card{max-width:min(360px,100%);display:grid;gap:8px}
 .dsh-voice-panel audio{width:100%;min-width:0}
 .dsh-voice-card pre,.dsh-voice-panel pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;margin:0}
 .dsh-voice-panel p{margin:0}.dsh-voice-actions{display:flex;flex-wrap:wrap;gap:8px}
-.dsh-voice-input button,.dsh-voice-card button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:6px;background:transparent;padding:4px 8px;cursor:pointer}
-.dsh-voice-input button:disabled,.dsh-voice-card button:disabled{opacity:.5;cursor:default}
+.dsh-voice-input button,.dsh-voice-panel button,.dsh-voice-card button{font:inherit;color:inherit;border:1px solid var(--dsw-alias-border-l2,#ccc);border-radius:6px;background:transparent;padding:4px 8px;cursor:pointer}
+.dsh-voice-input button:disabled,.dsh-voice-panel button:disabled,.dsh-voice-card button:disabled{opacity:.5;cursor:default}
 .dsh-voice-meta{font-size:13px;color:var(--dsw-alias-label-secondary)}
 `;
 
