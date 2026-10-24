@@ -1,13 +1,29 @@
 name: CI
 on:
   push:
-    branches: [main, feat/voice-message]
+    branches: [main]
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux Chromium
+            browsers: chromium
+            command: node --test --test-name-pattern='^(?!WebKit:)' test/*.test.mjs
+          - os: macos-latest
+            label: macOS Chromium and WebKit
+            browsers: chromium webkit
+            command: npm test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,8 +31,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium webkit
+      - run: npx playwright install --with-deps ${{ matrix.browsers }}
       - run: npm run build
       - run: git diff --exit-code -- client.js
-      - run: npm test
+      - run: ${{ matrix.command }}
       - run: npm pack --dry-run --ignore-scripts

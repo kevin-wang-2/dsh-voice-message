@@ -11,6 +11,9 @@ async function boot(browser){
  await page.route('https://voice.test/**',route=>route.fulfill({contentType:'text/html',body:'<!doctype html><html><body><div id="messages"></div><div id="input" style="position:absolute;bottom:10px;right:20px"></div></body></html>'}));
  await page.goto('https://voice.test/');
  await page.addScriptTag({content:fixture});
+ const capabilities=await page.evaluate(()=>({recorder:typeof MediaRecorder,audioContext:typeof AudioContext}));
+ assert.equal(capabilities.recorder,'function','This recording test requires a browser build with MediaRecorder');
+ assert.equal(capabilities.audioContext,'function');
  await page.getByRole('button',{name:'语音消息',exact:true}).click();
  return page;
 }
