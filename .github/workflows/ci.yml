@@ -1,0 +1,38 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            label: Linux Chromium
+            browsers: chromium
+            command: node --test --test-skip-pattern='WebKit:' test/*.test.mjs
+          - os: macos-latest
+            label: macOS Chromium and WebKit
+            browsers: chromium webkit
+            command: npm test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps ${{ matrix.browsers }}
+      - run: npm run build
+      - run: git diff --exit-code -- client.js
+      - run: ${{ matrix.command }}
+      - run: npm pack --dry-run --ignore-scripts
